@@ -14,10 +14,16 @@
 #include <sys/queue.h>
 #include <time.h>
 #include <inttypes.h>
-#include <fcntl.h>
 
 #ifndef WIN32
 #include <unistd.h>
+#include <fcntl.h>
+#else
+#include "vc_compat.h"
+#include "getopt.h"
+#include <fcntl.h>
+#include <io.h>
+#pragma warning(disable:4028)
 #endif
 
 #include <event2/event.h>
