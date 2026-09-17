@@ -4494,6 +4494,15 @@ lsquic_send_ctl_0rtt_to_1rtt (struct lsquic_send_ctl *ctl)
     while (packet_out = TAILQ_FIRST(&ctl->sc_0rtt_stash), packet_out != NULL)
     {
         TAILQ_REMOVE(&ctl->sc_0rtt_stash, packet_out, po_next);
+        if (packet_out->po_flags & PO_BW_PROBE_FILL)
+        {
+            /* Probe fill packets carry nothing but PING and PADDING: putting
+             * them back on the wire has no value.
+             */
+            assert(packet_out->po_loss_chain == packet_out);
+            send_ctl_destroy_packet(ctl, packet_out);
+            continue;
+        }
         TAILQ_INSERT_TAIL(&ctl->sc_lost_packets, packet_out, po_next);
         packet_out->po_flags |= PO_LOST;
     }
