@@ -3641,8 +3641,15 @@ full_conn_ci_tick (lsquic_conn_t *lconn, lsquic_time_t now)
     if (!TAILQ_EMPTY(&conn->fc_pub.write_streams))
         process_streams_write_events(conn, 0);
 
-    lsquic_send_ctl_maybe_app_limited(&conn->fc_send_ctl, &conn->fc_path,
-                                        full_conn_bw_probe_fill, conn);
+    // Do not fill in extra packets before the handshake is complete or when
+    // the connection is closing.
+    if ((conn->fc_conn.cn_flags & LSCONN_HANDSHAKE_DONE)
+        && !(conn->fc_flags & (FC_CLOSING|FC_IMMEDIATE_CLOSE_FLAGS)))
+        lsquic_send_ctl_maybe_app_limited(&conn->fc_send_ctl, &conn->fc_path,
+                        full_conn_bw_probe_fill, conn);
+    else
+        lsquic_send_ctl_maybe_app_limited(&conn->fc_send_ctl, &conn->fc_path,
+                        NULL, NULL);
 
   end_write:
 
