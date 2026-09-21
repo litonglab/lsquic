@@ -286,7 +286,8 @@ send_ctl_first_unacked_retx_packet (const struct lsquic_send_ctl *ctl,
 
     TAILQ_FOREACH(packet_out, &ctl->sc_unacked_packets[pns], po_next)
         if (0 == (packet_out->po_flags & (PO_LOSS_REC|PO_POISON))
-                && (packet_out->po_frame_types & ctl->sc_retx_frames))
+                && ((packet_out->po_frame_types & ctl->sc_retx_frames)
+                        || (packet_out->po_flags & PO_BW_PROBE_FILL)))
             return packet_out;
 
     return NULL;
@@ -309,7 +310,8 @@ send_ctl_last_unacked_retx_packet (const struct lsquic_send_ctl *ctl,
     TAILQ_FOREACH_REVERSE(packet_out, &ctl->sc_unacked_packets[pns],
                                             lsquic_packets_tailq, po_next)
         if (0 == (packet_out->po_flags & (PO_LOSS_REC|PO_POISON))
-                && (packet_out->po_frame_types & ctl->sc_retx_frames))
+                && ((packet_out->po_frame_types & ctl->sc_retx_frames)
+                        || (packet_out->po_flags & PO_BW_PROBE_FILL)))
             return packet_out;
     return NULL;
 }
@@ -798,7 +800,8 @@ send_ctl_unacked_append (struct lsquic_send_ctl *ctl,
     packet_out->po_flags |= PO_UNACKED;
     ctl->sc_bytes_unacked_all += packet_out_sent_sz(packet_out);
     ctl->sc_n_in_flight_all  += 1;
-    if (packet_out->po_frame_types & ctl->sc_retx_frames)
+    if ((packet_out->po_frame_types & ctl->sc_retx_frames)
+            || (packet_out->po_flags & PO_BW_PROBE_FILL))
     {
         ctl->sc_bytes_unacked_retx += packet_out_total_sz(packet_out);
         ++ctl->sc_n_in_flight_retx;
@@ -818,7 +821,8 @@ send_ctl_unacked_remove (struct lsquic_send_ctl *ctl,
     assert(ctl->sc_bytes_unacked_all >= packet_sz);
     ctl->sc_bytes_unacked_all -= packet_sz;
     ctl->sc_n_in_flight_all  -= 1;
-    if (packet_out->po_frame_types & ctl->sc_retx_frames)
+    if ((packet_out->po_frame_types & ctl->sc_retx_frames)
+            || (packet_out->po_flags & PO_BW_PROBE_FILL))
     {
         ctl->sc_bytes_unacked_retx -= packet_sz;
         --ctl->sc_n_in_flight_retx;
@@ -985,7 +989,8 @@ lsquic_send_ctl_sent_packet (lsquic_send_ctl_t *ctl,
         ctl->sc_ci->cci_sent(CGP(ctl), packet_out, ctl->sc_bytes_unacked_all,
                                             ctl->sc_flags & SC_APP_LIMITED);
     send_ctl_unacked_append(ctl, packet_out);
-    if (packet_out->po_frame_types & ctl->sc_retx_frames)
+    if ((packet_out->po_frame_types & ctl->sc_retx_frames)
+            || (packet_out->po_flags & PO_BW_PROBE_FILL))
     {
         if (!lsquic_alarmset_is_set(ctl->sc_alset, AL_RETX_INIT + pns))
             set_retx_alarm(ctl, pns, packet_out->po_sent);
