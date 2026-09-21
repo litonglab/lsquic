@@ -206,6 +206,7 @@ init_bbr (struct lsquic_bbr *bbr)
     bbr->bbr_flags &= ~BBR_FLAG_FLEXIBLE_APP_LIMITED;
     bbr->bbr_flags &= ~BBR_BW_SAMPLE_INVALID_PROBE_RTT;
     bbr->bbr_total_acked = 0;
+    bbr->bbr_last_stream_sent = 0;
     set_startup_values(bbr);
 }
 
@@ -409,6 +410,12 @@ bbr_copilot_sent (void *cong_ctl, struct lsquic_packet_out *packet_out,
     struct lsquic_bbr *const bbr = cong_ctl;
 
     lsquic_bbr_sent(cong_ctl, packet_out, in_flight, app_limited);
+
+    /* Remember when the application last sent data.  Fill probes carry only
+     * PING frames and thus do not refresh this timestamp.
+     */
+    if (packet_out->po_frame_types & QUIC_FTBIT_STREAM)
+        bbr->bbr_last_stream_sent = packet_out->po_sent;
 
     if (bbr->bbr_mode == BBR_MODE_PROBE_RTT)
         bbr->bbr_probe_rtt_app_limited_until = bbr->bbr_last_sent_packno;
@@ -1116,6 +1123,12 @@ lsquic_bbr_end_ack (void *cong_ctl, uint64_t in_flight)
 }
 
 
+/* How long a connection may go without sending a STREAM frame before it is
+ * considered idle and fill probes are stopped.
+ */
+#define kBwProbeFillIdleTimeout sec(1)
+
+
 static int
 bbr_copilot_bw_probe_fill_wanted (void *cong_ctl)
 {
@@ -1123,7 +1136,13 @@ bbr_copilot_bw_probe_fill_wanted (void *cong_ctl)
 
     if (bbr->bbr_pacing_gain <= 1.0)
         return 0;
-    return 1;
+    else if (0 == bbr->bbr_last_stream_sent)
+        return 0;
+    else if (lsquic_time_now() - bbr->bbr_last_stream_sent
+                                        > kBwProbeFillIdleTimeout)
+        return 0;
+    else
+        return 1;
 }
 
 

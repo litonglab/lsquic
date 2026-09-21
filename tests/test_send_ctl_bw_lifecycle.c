@@ -38,6 +38,7 @@
 #include "lsquic_malo.h"
 #include "lsquic_enc_sess.h"
 #include "lsquic_logger.h"
+#include "lsquic_util.h"
 
 
 struct bw_lifecycle_test
@@ -348,7 +349,15 @@ test_cc_algo_selection (void)
     assert(LSQUIC_CC_BBR_COPILOT
                         == lsquic_send_ctl_get_cc_algo(&t.send_ctl));
     assert(t.send_ctl.sc_ci == &lsquic_cong_bbr_copilot_if);
+    /* No STREAM frame sent yet: an idle connection must not fill. */
+    assert(0 == t.send_ctl.sc_ci->cci_bw_probe_fill_wanted(
+                                              t.send_ctl.sc_cong_ctl));
+    t.send_ctl.sc_adaptive_cc.acc_bbr.bbr_last_stream_sent = lsquic_time_now();
     assert(1 == t.send_ctl.sc_ci->cci_bw_probe_fill_wanted(
+                                              t.send_ctl.sc_cong_ctl));
+    /* Idle since long ago: fill must stop. */
+    t.send_ctl.sc_adaptive_cc.acc_bbr.bbr_last_stream_sent -= 2 * 1000000;
+    assert(0 == t.send_ctl.sc_ci->cci_bw_probe_fill_wanted(
                                               t.send_ctl.sc_cong_ctl));
     cleanup_test(&t);
 }
@@ -368,6 +377,7 @@ test_bbr_copilot_switch_preserves_state (void)
                         == lsquic_send_ctl_get_cc_algo(&t.send_ctl));
     assert(t.send_ctl.sc_ci == &lsquic_cong_bbr_copilot_if);
     assert(1.25 == t.send_ctl.sc_adaptive_cc.acc_bbr.bbr_pacing_gain);
+    t.send_ctl.sc_adaptive_cc.acc_bbr.bbr_last_stream_sent = lsquic_time_now();
     assert(1 == t.send_ctl.sc_ci->cci_bw_probe_fill_wanted(
                                               t.send_ctl.sc_cong_ctl));
 

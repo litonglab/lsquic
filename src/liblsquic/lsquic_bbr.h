@@ -212,6 +212,13 @@ struct lsquic_bbr
      * sampler's app-limited phase semantics.
      */
     lsquic_packno_t             bbr_probe_rtt_app_limited_until;
+
+    /* Time at which a packet carrying a STREAM frame was last sent.  Zero
+     * means that the application has not sent any data yet.  Fill probes are
+     * only useful while the application is actually sending data, so this
+     * timestamp is the application-activity signal.
+     */
+    lsquic_time_t               bbr_last_stream_sent;
 };
 
 extern const struct cong_ctl_if lsquic_cong_bbr_if;
