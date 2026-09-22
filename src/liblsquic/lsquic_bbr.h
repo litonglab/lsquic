@@ -213,12 +213,11 @@ struct lsquic_bbr
      */
     lsquic_packno_t             bbr_probe_rtt_app_limited_until;
 
-    /* Time at which a packet carrying a STREAM frame was last sent.  Zero
-     * means that the application has not sent any data yet.  Fill probes are
-     * only useful while the application is actually sending data, so this
-     * timestamp is the application-activity signal.
+    /* Time at which a packet carrying application data was last sent.  Zero
+     * means that the application has not sent any data yet.  Fill probes
+     * are only useful while the application is actually sending data.
      */
-    lsquic_time_t               bbr_last_stream_sent;
+    lsquic_time_t               bbr_last_app_data_sent;
 };
 
 extern const struct cong_ctl_if lsquic_cong_bbr_if;

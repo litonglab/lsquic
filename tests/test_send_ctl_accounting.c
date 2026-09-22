@@ -357,7 +357,7 @@ test_bw_probe_fill_scheduling (void)
     assert(t.send_ctl.sc_flags & SC_APP_LIMITED);
 
     bbr->bbr_pacing_gain = 1.25;
-    bbr->bbr_last_stream_sent = lsquic_time_now();
+    bbr->bbr_last_app_data_sent = lsquic_time_now();
     lsquic_send_ctl_tick_in(&t.send_ctl, 2000);
     lsquic_send_ctl_maybe_app_limited(&t.send_ctl, &t.path,
                                             generate_bw_probe_fill, &t);
