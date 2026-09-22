@@ -9,6 +9,7 @@
 #include "lsquic_int_types.h"
 #include "lsquic_types.h"
 #include "lsquic_packet_common.h"
+#include "lsquic_packet_gquic.h"
 #include "lsquic_alarmset.h"
 #include "lsquic_conn_flow.h"
 #include "lsquic_rtt.h"
@@ -438,6 +439,60 @@ test_lost_bw_probe_fill_is_not_rescheduled (void)
 }
 
 
+static void
+test_bw_probe_fill_alarm_does_not_trigger_recovery (void)
+{
+    static const enum quic_ft_bit retx_masks[] = {
+        IQUIC_FRAME_RETX_MASK,
+        GQUIC_FRAME_RETRANSMITTABLE_MASK,
+    };
+    struct accounting_test t;
+    struct lsquic_packet_out *packet_out;
+    lsquic_time_t expiry;
+    unsigned i, n;
+
+    for (i = 0; i < sizeof(retx_masks) / sizeof(retx_masks[0]); ++i)
+    {
+        init_test(&t);
+        t.send_ctl.sc_retx_frames = retx_masks[i];
+        assert(0 == lsquic_send_ctl_set_cc_algo(&t.send_ctl,
+                                                LSQUIC_CC_BBR_COPILOT));
+
+        for (n = 0; n < 4; ++n)
+        {
+            packet_out = generate_bw_probe_fill(&t, &t.path);
+            packet_out->po_flags |= PO_BW_PROBE_FILL;
+            lsquic_send_ctl_scheduled_one(&t.send_ctl, packet_out);
+            packet_out = lsquic_send_ctl_next_packet_to_send(&t.send_ctl,
+                                                                        NULL);
+            assert(packet_out);
+            packet_out->po_sent = 1000 + n;
+            assert(0 == lsquic_send_ctl_sent_packet(&t.send_ctl, packet_out));
+        }
+
+        assert(4 == t.send_ctl.sc_n_in_flight_all);
+        assert(4 == t.send_ctl.sc_n_in_flight_retx);
+        assert(lsquic_alarmset_is_set(&t.alset, AL_RETX_APP));
+        expiry = t.alset.as_expiry[AL_RETX_APP];
+        lsquic_alarmset_ring_expired(&t.alset, expiry + 1);
+
+        assert(TAILQ_EMPTY(&t.send_ctl.sc_unacked_packets[PNS_APP]));
+        assert(TAILQ_EMPTY(&t.send_ctl.sc_lost_packets));
+        assert(TAILQ_EMPTY(&t.send_ctl.sc_scheduled_packets));
+        assert(0 == t.send_ctl.sc_n_in_flight_all);
+        assert(0 == t.send_ctl.sc_n_in_flight_retx);
+        assert(0 == t.send_ctl.sc_bytes_unacked_all);
+        assert(0 == t.send_ctl.sc_bytes_unacked_retx);
+        assert(0 == t.send_ctl.sc_n_tlp);
+        assert(0 == t.send_ctl.sc_n_consec_rtos);
+        assert(0 == t.send_ctl.sc_next_limit);
+        assert(!lsquic_alarmset_is_set(&t.alset, AL_RETX_APP));
+        assert(4 == t.stats.out.lost_packets);
+        cleanup_test(&t);
+    }
+}
+
+
 int
 main (void)
 {
@@ -450,5 +505,6 @@ main (void)
     test_repackno_chops_regen_bytes();
     test_bw_probe_fill_scheduling();
     test_lost_bw_probe_fill_is_not_rescheduled();
+    test_bw_probe_fill_alarm_does_not_trigger_recovery();
     return 0;
 }

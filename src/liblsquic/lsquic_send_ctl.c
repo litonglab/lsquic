@@ -207,7 +207,7 @@ static void
 update_for_resending (lsquic_send_ctl_t *ctl, lsquic_packet_out_t *packet_out);
 
 
-enum expire_filter { EXFI_ALL, EXFI_HSK, EXFI_LAST, };
+enum expire_filter { EXFI_ALL, EXFI_HSK, EXFI_LAST, EXFI_PROBE_FILL, };
 
 
 static void
@@ -322,7 +322,8 @@ send_ctl_last_unacked_retx_packet (const struct lsquic_send_ctl *ctl,
     TAILQ_FOREACH_REVERSE(packet_out, &ctl->sc_unacked_packets[pns],
                                             lsquic_packets_tailq, po_next)
         if (0 == (packet_out->po_flags & (PO_LOSS_REC|PO_POISON))
-                && send_ctl_packet_needs_retx_tracking(ctl, packet_out))
+                && (packet_out->po_frame_types & ctl->sc_retx_frames)
+                && !(packet_out->po_flags & PO_BW_PROBE_FILL))
             return packet_out;
     return NULL;
 }
@@ -392,6 +393,19 @@ retx_alarm_rings (enum alarm_id al_id, void *ctx, lsquic_time_t expiry, lsquic_t
 
     /* This is a callback -- before it is called, the alarm is unset */
     assert(!lsquic_alarmset_is_set(ctl->sc_alset, AL_RETX_INIT + pns));
+
+    /*
+     * Probe-fill packets need an alarm so that lost ACKs cannot leave them
+     * occupying the congestion window forever.  They are not retransmittable,
+     * however, and must not consume TLP attempts or cause an RTO.
+     */
+    send_ctl_expire(ctl, pns, EXFI_PROBE_FILL);
+    packet_out = send_ctl_first_unacked_retx_packet(ctl, pns);
+    if (!packet_out)
+    {
+        lsquic_send_ctl_sanity_check(ctl);
+        return;
+    }
 
     rm = get_retx_mode(ctl);
     LSQ_INFO("%s timeout, mode %s", lsquic_alid2str[al_id], retx2str[rm]);
@@ -2145,10 +2159,23 @@ send_ctl_expire (struct lsquic_send_ctl *ctl, enum packnum_space pns,
         [EXFI_ALL] = "all",
         [EXFI_HSK] = "handshake",
         [EXFI_LAST] = "last",
+        [EXFI_PROBE_FILL] = "probe fill",
     };
 
     switch (filter)
     {
+    case EXFI_PROBE_FILL:
+        n_resubmitted = 0;
+        for (packet_out = TAILQ_FIRST(&ctl->sc_unacked_packets[pns]);
+                                                packet_out; packet_out = next)
+        {
+            next = TAILQ_NEXT(packet_out, po_next);
+            if (0 == (packet_out->po_flags & (PO_LOSS_REC|PO_POISON))
+                    && (packet_out->po_flags & PO_BW_PROBE_FILL))
+                n_resubmitted += send_ctl_handle_lost_packet(ctl, packet_out,
+                                                                        &next);
+        }
+        break;
     case EXFI_ALL:
         n_resubmitted = 0;
         for (packet_out = TAILQ_FIRST(&ctl->sc_unacked_packets[pns]);
