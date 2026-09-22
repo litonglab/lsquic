@@ -278,6 +278,19 @@ lsquic_send_ctl_have_unacked_stream_frames (const lsquic_send_ctl_t *ctl)
 }
 
 
+/*
+ * Probe-fill packets are never retransmitted, but they occupy the congestion
+ * window and must participate in pacing, PTO, and quiescence accounting.
+ */
+static int
+send_ctl_packet_needs_retx_tracking (const struct lsquic_send_ctl *ctl,
+                                     const struct lsquic_packet_out *packet_out)
+{
+    return (packet_out->po_frame_types & ctl->sc_retx_frames)
+                                || (packet_out->po_flags & PO_BW_PROBE_FILL);
+}
+
+
 static lsquic_packet_out_t *
 send_ctl_first_unacked_retx_packet (const struct lsquic_send_ctl *ctl,
                                                         enum packnum_space pns)
@@ -286,8 +299,7 @@ send_ctl_first_unacked_retx_packet (const struct lsquic_send_ctl *ctl,
 
     TAILQ_FOREACH(packet_out, &ctl->sc_unacked_packets[pns], po_next)
         if (0 == (packet_out->po_flags & (PO_LOSS_REC|PO_POISON))
-                && ((packet_out->po_frame_types & ctl->sc_retx_frames)
-                        || (packet_out->po_flags & PO_BW_PROBE_FILL)))
+                && send_ctl_packet_needs_retx_tracking(ctl, packet_out))
             return packet_out;
 
     return NULL;
@@ -310,8 +322,7 @@ send_ctl_last_unacked_retx_packet (const struct lsquic_send_ctl *ctl,
     TAILQ_FOREACH_REVERSE(packet_out, &ctl->sc_unacked_packets[pns],
                                             lsquic_packets_tailq, po_next)
         if (0 == (packet_out->po_flags & (PO_LOSS_REC|PO_POISON))
-                && ((packet_out->po_frame_types & ctl->sc_retx_frames)
-                        || (packet_out->po_flags & PO_BW_PROBE_FILL)))
+                && send_ctl_packet_needs_retx_tracking(ctl, packet_out))
             return packet_out;
     return NULL;
 }
@@ -800,8 +811,7 @@ send_ctl_unacked_append (struct lsquic_send_ctl *ctl,
     packet_out->po_flags |= PO_UNACKED;
     ctl->sc_bytes_unacked_all += packet_out_sent_sz(packet_out);
     ctl->sc_n_in_flight_all  += 1;
-    if ((packet_out->po_frame_types & ctl->sc_retx_frames)
-            || (packet_out->po_flags & PO_BW_PROBE_FILL))
+    if (send_ctl_packet_needs_retx_tracking(ctl, packet_out))
     {
         ctl->sc_bytes_unacked_retx += packet_out_total_sz(packet_out);
         ++ctl->sc_n_in_flight_retx;
@@ -821,8 +831,7 @@ send_ctl_unacked_remove (struct lsquic_send_ctl *ctl,
     assert(ctl->sc_bytes_unacked_all >= packet_sz);
     ctl->sc_bytes_unacked_all -= packet_sz;
     ctl->sc_n_in_flight_all  -= 1;
-    if ((packet_out->po_frame_types & ctl->sc_retx_frames)
-            || (packet_out->po_flags & PO_BW_PROBE_FILL))
+    if (send_ctl_packet_needs_retx_tracking(ctl, packet_out))
     {
         ctl->sc_bytes_unacked_retx -= packet_sz;
         --ctl->sc_n_in_flight_retx;
@@ -989,8 +998,7 @@ lsquic_send_ctl_sent_packet (lsquic_send_ctl_t *ctl,
         ctl->sc_ci->cci_sent(CGP(ctl), packet_out, ctl->sc_bytes_unacked_all,
                                             ctl->sc_flags & SC_APP_LIMITED);
     send_ctl_unacked_append(ctl, packet_out);
-    if ((packet_out->po_frame_types & ctl->sc_retx_frames)
-            || (packet_out->po_flags & PO_BW_PROBE_FILL))
+    if (send_ctl_packet_needs_retx_tracking(ctl, packet_out))
     {
         if (!lsquic_alarmset_is_set(ctl->sc_alset, AL_RETX_INIT + pns))
             set_retx_alarm(ctl, pns, packet_out->po_sent);

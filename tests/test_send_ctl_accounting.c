@@ -388,24 +388,51 @@ static void
 test_lost_bw_probe_fill_is_not_rescheduled (void)
 {
     struct accounting_test t;
-    struct lsquic_packet_out *packet_out;
+    struct lsquic_packet_out *packet_out, *next_packet_out;
+    unsigned packet_sz;
 
     init_test(&t);
+    assert(0 == lsquic_send_ctl_set_cc_algo(&t.send_ctl,
+                                            LSQUIC_CC_BBR_COPILOT));
+    t.send_ctl.sc_flags |= SC_PACE;
     packet_out = generate_bw_probe_fill(&t, &t.path);
     packet_out->po_flags |= PO_BW_PROBE_FILL;
+    assert(0 == (packet_out->po_frame_types
+                                        & t.send_ctl.sc_retx_frames));
     lsquic_send_ctl_scheduled_one(&t.send_ctl, packet_out);
     packet_out = lsquic_send_ctl_next_packet_to_send(&t.send_ctl, NULL);
     assert(packet_out);
     packet_out->po_sent = 1000;
     assert(0 == lsquic_send_ctl_sent_packet(&t.send_ctl, packet_out));
+    packet_sz = lsquic_packet_out_total_sz(&t.lconn, packet_out);
     assert(1 == t.send_ctl.sc_n_in_flight_all);
+    assert(1 == t.send_ctl.sc_n_in_flight_retx);
+    assert(packet_sz == t.send_ctl.sc_bytes_unacked_retx);
+    assert(packet_out->po_bwp_state);
+    assert(t.send_ctl.sc_flags & SC_WAS_QUIET);
+    assert(lsquic_alarmset_is_set(&t.alset, AL_RETX_APP));
+    assert(lsquic_send_ctl_have_unacked_retx_data(&t.send_ctl));
+
+    /*
+     * An in-flight probe-fill packet must prevent the pacer from treating the
+     * connection as empty and replenishing its burst allowance.
+     */
+    t.send_ctl.sc_pacer.pa_burst_tokens = 0;
+    next_packet_out = generate_bw_probe_fill(&t, &t.path);
+    next_packet_out->po_flags |= PO_BW_PROBE_FILL;
+    lsquic_send_ctl_scheduled_one(&t.send_ctl, next_packet_out);
+    assert(0 == t.send_ctl.sc_pacer.pa_burst_tokens);
+    lsquic_send_ctl_drop_scheduled(&t.send_ctl);
 
     lsquic_send_ctl_expire_all(&t.send_ctl);
     assert(TAILQ_EMPTY(&t.send_ctl.sc_unacked_packets[PNS_APP]));
     assert(TAILQ_EMPTY(&t.send_ctl.sc_lost_packets));
     assert(TAILQ_EMPTY(&t.send_ctl.sc_scheduled_packets));
     assert(0 == t.send_ctl.sc_n_in_flight_all);
+    assert(0 == t.send_ctl.sc_n_in_flight_retx);
     assert(0 == t.send_ctl.sc_bytes_unacked_all);
+    assert(0 == t.send_ctl.sc_bytes_unacked_retx);
+    assert(!lsquic_alarmset_is_set(&t.alset, AL_RETX_APP));
     assert(1 == t.stats.out.lost_packets);
     cleanup_test(&t);
 }
@@ -414,6 +441,7 @@ test_lost_bw_probe_fill_is_not_rescheduled (void)
 int
 main (void)
 {
+    lsquic_init_timers();
     test_dcid_change_next_packet_to_send();
     test_dcid_change_cleanup();
     test_dcid_change_drop_scheduled();

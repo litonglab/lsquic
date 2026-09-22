@@ -467,6 +467,7 @@ test_cc_algo_default (void)
 int
 main (void)
 {
+    lsquic_init_timers();
     lsquic_log_to_fstream(stderr, LLTS_NONE);
     test_cubic_lazy_enable();
     test_adaptive_switch_without_info_drops_sampler();
