@@ -3411,16 +3411,14 @@ full_conn_bw_probe_fill (void *conn_ctx, const struct network_path *path)
                 lsquic_packet_out_avail(packet_out));
     if (sz < 0)
     {
+        lsquic_packet_out_destroy(packet_out, conn->fc_enpub,
+                                                    path->np_peer_ctx);
         ABORT_ERROR("gen_ping_frame failed");
         return NULL;
     }
     lsquic_send_ctl_incr_pack_sz(&conn->fc_send_ctl, packet_out, sz);
     packet_out->po_frame_types |= 1 << QUIC_FRAME_PING;
     LSQ_DEBUG("wrote PING frame");
-    if (!(conn->fc_flags & FC_SERVER))
-        log_conn_flow_control(conn);
-
-    lsquic_packet_out_set_pns(packet_out, PNS_APP);
     lsquic_packet_out_zero_pad(packet_out);
 
     return packet_out;
