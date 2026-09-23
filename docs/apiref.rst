@@ -2222,6 +2222,14 @@ available through engine settings.
 
         The values are the same as for ``es_cc_algo``.
 
+        When read with :func:`lsquic_conn_get_param()`, this parameter
+        reflects the congestion controller that is currently in use.  An
+        Adaptive connection does not stay on the Adaptive controller: once
+        the RTT has been measured, Adaptive selects Cubic or BBRv1 and the
+        read-back value is ``LSQUIC_CC_CUBIC`` or ``LSQUIC_CC_BBR``
+        accordingly.  ``LSQUIC_CC_ADAPTIVE`` is therefore not reported
+        after the selection has been made.
+
 .. function:: int lsquic_conn_set_param (lsquic_conn_t *conn, enum lsquic_conn_param param, const void *value, size_t value_len)
 
     Set a connection parameter.
@@ -2285,6 +2293,11 @@ available through engine settings.
     :return: 0 on success, -1 on error
 
     This function retrieves the current value of a connection parameter.
+
+    **Note:** :member:`LSQCP_CC_ALGO` returns the congestion controller
+    that is currently in use.  An Adaptive connection reports the
+    controller that Adaptive selected (Cubic or BBRv1), not
+    ``LSQUIC_CC_ADAPTIVE``; see :member:`LSQCP_CC_ALGO`.
 
     **Example - Reading current pacing rate:**
 

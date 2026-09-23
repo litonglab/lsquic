@@ -86,7 +86,10 @@ connection, typically from the ``on_new_conn`` callback:
     }
 
 Passing ``LSQUIC_CC_DEFAULT`` selects the library default.  The current
-controller can be read using :func:`lsquic_conn_get_param()`.
+controller can be read using :func:`lsquic_conn_get_param()` with
+``LSQCP_CC_ALGO``.  A connection configured with ``LSQUIC_CC_ADAPTIVE``
+reports the controller that Adaptive selected (Cubic or BBRv1) once the
+RTT has been measured, not ``LSQUIC_CC_ADAPTIVE``.
 
 Reference
 =========
