@@ -8219,7 +8219,8 @@ ietf_full_conn_bw_probe_fill (void *conn_ctx, const struct network_path *path)
     sz = conn->ifc_conn.cn_pf->pf_gen_ping_frame(
                 packet_out->po_data + packet_out->po_data_sz,
                 lsquic_packet_out_avail(packet_out));
-    if (sz < 0) {
+    if (sz < 0)
+    {
         ABORT_ERROR("gen_ping_frame failed");
         return NULL;
     }

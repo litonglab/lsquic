@@ -1134,15 +1134,12 @@ bbr_copilot_bw_probe_fill_wanted (void *cong_ctl)
 {
     struct lsquic_bbr *const bbr = cong_ctl;
 
-    if (bbr->bbr_pacing_gain <= 1.0)
-        return 0;
-    else if (0 == bbr->bbr_last_app_data_sent)
-        return 0;
-    else if (lsquic_time_now() - bbr->bbr_last_app_data_sent
+    if (0 == bbr->bbr_last_app_data_sent
+            || lsquic_time_now() - bbr->bbr_last_app_data_sent
                                         > kBwProbeFillIdleTimeout)
         return 0;
     else
-        return 1;
+        return bbr->bbr_pacing_gain > 1.0;
 }
 
 
