@@ -444,6 +444,100 @@ test_lost_bw_probe_fill_is_not_rescheduled (void)
 
 
 static void
+test_bw_probe_fill_delayed_ack (enum quic_ft_bit retx_frames,
+                              int with_data, int loss_alarm)
+{
+    struct accounting_test t;
+    struct lsquic_packet_out *packet_out, *probes[4];
+    struct ack_info acki;
+    lsquic_time_t expiry;
+    unsigned n, probe_bytes, data_bytes, lost;
+
+    init_test(&t);
+    t.send_ctl.sc_retx_frames = retx_frames;
+    t.send_ctl.sc_flags &= ~SC_PACE;
+    t.conn_pub.rtt_stats.srtt = 5000;
+    t.conn_pub.rtt_stats.min_rtt = 5000;
+    t.conn_pub.max_peer_ack_usec = 25000;
+    assert(0 == lsquic_send_ctl_set_cc_algo(&t.send_ctl,
+                                            LSQUIC_CC_BBR_COPILOT));
+    if (loss_alarm)
+        t.send_ctl.sc_loss_to = 1250;
+
+    memset(&acki, 0, sizeof(acki));
+    acki.pns = PNS_APP;
+    acki.n_ranges = 1;
+    acki.lack_delta = 25000;
+    data_bytes = 0;
+    if (with_data)
+    {
+        packet_out = new_ping_packet(&t, 1);
+        packet_out->po_frame_types = QUIC_FTBIT_STREAM;
+        assert(packet_out->po_frame_types & retx_frames);
+        packet_out->po_sent = 1000;
+        acki.ranges[0].low = packet_out->po_packno;
+        data_bytes = lsquic_packet_out_total_sz(&t.lconn, packet_out);
+        assert(0 == lsquic_send_ctl_sent_packet(&t.send_ctl, packet_out));
+    }
+
+    probe_bytes = 0;
+    for (n = 0; n < 4; ++n)
+    {
+        probes[n] = packet_out = generate_bw_probe_fill(&t, &t.path);
+        packet_out->po_flags |= PO_BW_PROBE_FILL;
+        packet_out->po_sent = 1000 + n;
+        probe_bytes += lsquic_packet_out_total_sz(&t.lconn, packet_out);
+        if (!with_data && n == 0)
+            acki.ranges[0].low = packet_out->po_packno;
+        acki.ranges[0].high = packet_out->po_packno;
+        /* Rearm with multiple packets in flight to exercise the short TLP. */
+        if (n == 3)
+            lsquic_alarmset_unset(&t.alset, AL_RETX_APP);
+        assert(0 == lsquic_send_ctl_sent_packet(&t.send_ctl, packet_out));
+    }
+
+    expiry = t.alset.as_expiry[AL_RETX_APP];
+    assert(1003 + (loss_alarm ? 1250 : 10000) == expiry);
+    lsquic_alarmset_ring_expired(&t.alset, expiry + 1);
+    lost = with_data && !loss_alarm;
+    assert(lost == t.stats.out.lost_packets);
+    assert(lost == t.send_ctl.sc_loss_count);
+    assert(lost * data_bytes == t.send_ctl.sc_bw_sampler.bws_total_lost);
+    assert(4 + with_data - lost == t.send_ctl.sc_n_in_flight_all);
+    assert(lost == t.send_ctl.sc_n_tlp);
+    assert(0 == t.send_ctl.sc_n_consec_rtos);
+    assert(0 == t.send_ctl.sc_next_limit);
+    assert(lsquic_alarmset_is_set(&t.alset, AL_RETX_APP));
+    if (lost)
+    {
+        expiry = t.alset.as_expiry[AL_RETX_APP];
+        assert(expiry < 31003);
+        lsquic_alarmset_ring_expired(&t.alset, expiry + 1);
+        assert(4 == t.send_ctl.sc_n_in_flight_all);
+        assert(1 == t.send_ctl.sc_n_tlp);
+        assert(t.alset.as_expiry[AL_RETX_APP] > 31003);
+    }
+    for (n = 0; n < 4; ++n)
+    {
+        assert(probes[n]->po_flags & PO_UNACKED);
+        assert(probes[n]->po_bwp_state);
+    }
+
+    assert(0 == lsquic_send_ctl_got_ack(&t.send_ctl, &acki, 31003, 31003));
+    assert(probe_bytes + (with_data - lost) * data_bytes
+                                == t.send_ctl.sc_bw_sampler.bws_total_acked);
+    assert(minmax_get(&t.send_ctl.sc_adaptive_cc.acc_bbr.bbr_max_bandwidth) > 0);
+    assert(lost * data_bytes == t.send_ctl.sc_bw_sampler.bws_total_lost);
+    assert(lost == t.stats.out.lost_packets);
+    assert(lost == t.send_ctl.sc_loss_count);
+    assert(0 == t.send_ctl.sc_n_in_flight_all);
+    assert(0 == t.send_ctl.sc_n_in_flight_retx);
+    assert(!lsquic_alarmset_is_set(&t.alset, AL_RETX_APP));
+    cleanup_test(&t);
+}
+
+
+static void
 test_bw_probe_fill_alarm_does_not_trigger_recovery (void)
 {
     static const enum quic_ft_bit retx_masks[] = {
@@ -459,6 +553,8 @@ test_bw_probe_fill_alarm_does_not_trigger_recovery (void)
     {
         init_test(&t);
         t.send_ctl.sc_retx_frames = retx_masks[i];
+        t.conn_pub.rtt_stats.srtt = 5000;
+        t.conn_pub.max_peer_ack_usec = 25000;
         assert(0 == lsquic_send_ctl_set_cc_algo(&t.send_ctl,
                                                 LSQUIC_CC_BBR_COPILOT));
 
@@ -470,7 +566,7 @@ test_bw_probe_fill_alarm_does_not_trigger_recovery (void)
             packet_out = lsquic_send_ctl_next_packet_to_send(&t.send_ctl,
                                                                         NULL);
             assert(packet_out);
-            packet_out->po_sent = 1000 + n;
+            packet_out->po_sent = 1000 + n * 1000;
             assert(0 == lsquic_send_ctl_sent_packet(&t.send_ctl, packet_out));
         }
 
@@ -479,6 +575,20 @@ test_bw_probe_fill_alarm_does_not_trigger_recovery (void)
         assert(lsquic_alarmset_is_set(&t.alset, AL_RETX_APP));
         expiry = t.alset.as_expiry[AL_RETX_APP];
         lsquic_alarmset_ring_expired(&t.alset, expiry + 1);
+        assert(4 == t.send_ctl.sc_n_in_flight_all);
+        assert(0 == t.stats.out.lost_packets);
+        assert(0 == t.send_ctl.sc_bw_sampler.bws_total_lost);
+
+        for (n = 0; n < 4; ++n)
+        {
+            assert(lsquic_alarmset_is_set(&t.alset, AL_RETX_APP));
+            expiry = t.alset.as_expiry[AL_RETX_APP];
+            assert(1000 + n * 1000 + 200000 + 25000 == expiry);
+            lsquic_alarmset_ring_expired(&t.alset, expiry + 1);
+            assert(3 - n == t.send_ctl.sc_n_in_flight_all);
+            assert(n + 1 == t.stats.out.lost_packets);
+            assert(n + 1 == t.send_ctl.sc_loss_count);
+        }
 
         assert(TAILQ_EMPTY(&t.send_ctl.sc_unacked_packets[PNS_APP]));
         assert(TAILQ_EMPTY(&t.send_ctl.sc_lost_packets));
@@ -612,6 +722,14 @@ main (void)
     test_repackno_chops_regen_bytes();
     test_bw_probe_fill_scheduling();
     test_lost_bw_probe_fill_is_not_rescheduled();
+    test_bw_probe_fill_delayed_ack(IQUIC_FRAME_RETX_MASK, 0, 0);
+    test_bw_probe_fill_delayed_ack(IQUIC_FRAME_RETX_MASK, 0, 1);
+    test_bw_probe_fill_delayed_ack(IQUIC_FRAME_RETX_MASK, 1, 0);
+    test_bw_probe_fill_delayed_ack(IQUIC_FRAME_RETX_MASK, 1, 1);
+    test_bw_probe_fill_delayed_ack(GQUIC_FRAME_RETRANSMITTABLE_MASK, 0, 0);
+    test_bw_probe_fill_delayed_ack(GQUIC_FRAME_RETRANSMITTABLE_MASK, 0, 1);
+    test_bw_probe_fill_delayed_ack(GQUIC_FRAME_RETRANSMITTABLE_MASK, 1, 0);
+    test_bw_probe_fill_delayed_ack(GQUIC_FRAME_RETRANSMITTABLE_MASK, 1, 1);
     test_bw_probe_fill_alarm_does_not_trigger_recovery();
     test_bw_probe_fill_skipped_during_rto_recovery();
     test_rto_drops_scheduled_bw_probe_fill();

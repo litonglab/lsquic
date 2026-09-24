@@ -207,12 +207,17 @@ static void
 update_for_resending (lsquic_send_ctl_t *ctl, lsquic_packet_out_t *packet_out);
 
 
-enum expire_filter { EXFI_ALL, EXFI_HSK, EXFI_LAST, EXFI_PROBE_FILL, };
+enum expire_filter { EXFI_ALL, EXFI_HSK, EXFI_LAST, };
 
 
 static void
 send_ctl_expire (struct lsquic_send_ctl *, enum packnum_space,
                                                         enum expire_filter);
+
+
+static void
+send_ctl_expire_probe_fill (struct lsquic_send_ctl *, enum packnum_space,
+                                                        lsquic_time_t);
 
 
 static void
@@ -407,10 +412,10 @@ retx_alarm_rings (enum alarm_id al_id, void *ctx, lsquic_time_t expiry, lsquic_t
      * occupying the congestion window forever.  They are not retransmittable,
      * however, and must not consume TLP attempts or cause an RTO.
      */
-    send_ctl_expire(ctl, pns, EXFI_PROBE_FILL);
-    packet_out = send_ctl_first_unacked_retx_packet(ctl, pns);
+    packet_out = send_ctl_last_unacked_retx_packet(ctl, pns);
     if (!packet_out)
     {
+        send_ctl_expire_probe_fill(ctl, pns, now);
         lsquic_send_ctl_sanity_check(ctl);
         return;
     }
@@ -2165,6 +2170,35 @@ lsquic_send_ctl_maybe_app_limited (struct lsquic_send_ctl *ctl,
 
 
 static void
+send_ctl_expire_probe_fill (struct lsquic_send_ctl *ctl, enum packnum_space pns,
+                                                            lsquic_time_t now)
+{
+    struct lsquic_packet_out *packet_out, *next;
+    lsquic_time_t delay, expiry, next_expiry;
+
+    delay = get_retx_delay(&ctl->sc_conn_pub->rtt_stats)
+                                + ctl->sc_conn_pub->max_peer_ack_usec;
+    next_expiry = 0;
+    for (packet_out = TAILQ_FIRST(&ctl->sc_unacked_packets[pns]);
+                                                packet_out; packet_out = next)
+    {
+        next = TAILQ_NEXT(packet_out, po_next);
+        if (0 == (packet_out->po_flags & (PO_LOSS_REC|PO_POISON))
+                && (packet_out->po_flags & PO_BW_PROBE_FILL))
+        {
+            expiry = packet_out->po_sent + delay;
+            if (expiry <= now)
+                send_ctl_handle_lost_packet(ctl, packet_out, &next);
+            else if (!next_expiry || expiry < next_expiry)
+                next_expiry = expiry;
+        }
+    }
+    if (next_expiry)
+        lsquic_alarmset_set(ctl->sc_alset, AL_RETX_INIT + pns, next_expiry);
+}
+
+
+static void
 send_ctl_expire (struct lsquic_send_ctl *ctl, enum packnum_space pns,
                                                     enum expire_filter filter)
 {
@@ -2174,23 +2208,10 @@ send_ctl_expire (struct lsquic_send_ctl *ctl, enum packnum_space pns,
         [EXFI_ALL] = "all",
         [EXFI_HSK] = "handshake",
         [EXFI_LAST] = "last",
-        [EXFI_PROBE_FILL] = "probe fill",
     };
 
     switch (filter)
     {
-    case EXFI_PROBE_FILL:
-        n_resubmitted = 0;
-        for (packet_out = TAILQ_FIRST(&ctl->sc_unacked_packets[pns]);
-                                                packet_out; packet_out = next)
-        {
-            next = TAILQ_NEXT(packet_out, po_next);
-            if (0 == (packet_out->po_flags & (PO_LOSS_REC|PO_POISON))
-                    && (packet_out->po_flags & PO_BW_PROBE_FILL))
-                n_resubmitted += send_ctl_handle_lost_packet(ctl, packet_out,
-                                                                        &next);
-        }
-        break;
     case EXFI_ALL:
         n_resubmitted = 0;
         for (packet_out = TAILQ_FIRST(&ctl->sc_unacked_packets[pns]);
