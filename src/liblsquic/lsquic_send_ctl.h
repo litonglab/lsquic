@@ -4,7 +4,6 @@
 
 #include <sys/queue.h>
 
-#include "lsquic.h"
 #include "lsquic_types.h"
 #include "lsquic_packet_out.h"
 
@@ -21,6 +20,7 @@ struct lsquic_conn_public;
 struct network_path;
 struct ver_neg;
 enum pns;
+enum lsquic_cc;
 struct to_coal;
 
 enum buf_packet_type { BPT_HIGHEST_PRIO, BPT_OTHER_PRIO, };

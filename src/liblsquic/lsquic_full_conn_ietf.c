@@ -8219,17 +8219,16 @@ ietf_full_conn_bw_probe_fill (void *conn_ctx, const struct network_path *path)
     sz = conn->ifc_conn.cn_pf->pf_gen_ping_frame(
                 packet_out->po_data + packet_out->po_data_sz,
                 lsquic_packet_out_avail(packet_out));
-    if (sz < 0) {
+    if (sz < 0)
+    {
+        lsquic_packet_out_destroy(packet_out, conn->ifc_enpub,
+                                                    path->np_peer_ctx);
         ABORT_ERROR("gen_ping_frame failed");
         return NULL;
     }
     lsquic_send_ctl_incr_pack_sz(&conn->ifc_send_ctl, packet_out, sz);
     packet_out->po_frame_types |= 1 << QUIC_FRAME_PING;
     LSQ_DEBUG("wrote PING frame");
-    if (!(conn->ifc_flags & IFC_SERVER))
-        log_conn_flow_control(conn);
-
-    lsquic_packet_out_set_pns(packet_out, PNS_APP);
     lsquic_packet_out_zero_pad(packet_out);
 
     return packet_out;
@@ -8431,8 +8430,15 @@ ietf_full_conn_ci_tick (struct lsquic_conn *lconn, lsquic_time_t now)
     if (!TAILQ_EMPTY(&conn->ifc_pub.write_streams))
         process_streams_write_events(conn, 0);
 
-    lsquic_send_ctl_maybe_app_limited(&conn->ifc_send_ctl, CUR_NPATH(conn),
-                                      ietf_full_conn_bw_probe_fill, conn);
+    // Do not fill in extra packets before the handshake is complete or when
+    // the connection is closing.
+    if ((conn->ifc_conn.cn_flags & LSCONN_HANDSHAKE_DONE)
+        && !(conn->ifc_flags & (IFC_CLOSING|IFC_IMMEDIATE_CLOSE_FLAGS)))
+        lsquic_send_ctl_maybe_app_limited(&conn->ifc_send_ctl, CUR_NPATH(conn),
+                        ietf_full_conn_bw_probe_fill, conn);
+    else
+        lsquic_send_ctl_maybe_app_limited(&conn->ifc_send_ctl, CUR_NPATH(conn),
+                        NULL, NULL);
 
   end_write:
     if ((conn->ifc_flags & IFC_CLOSING)

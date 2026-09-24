@@ -3409,17 +3409,16 @@ full_conn_bw_probe_fill (void *conn_ctx, const struct network_path *path)
     sz = conn->fc_conn.cn_pf->pf_gen_ping_frame(
                 packet_out->po_data + packet_out->po_data_sz,
                 lsquic_packet_out_avail(packet_out));
-    if (sz < 0) {
+    if (sz < 0)
+    {
+        lsquic_packet_out_destroy(packet_out, conn->fc_enpub,
+                                                    path->np_peer_ctx);
         ABORT_ERROR("gen_ping_frame failed");
         return NULL;
     }
     lsquic_send_ctl_incr_pack_sz(&conn->fc_send_ctl, packet_out, sz);
     packet_out->po_frame_types |= 1 << QUIC_FRAME_PING;
     LSQ_DEBUG("wrote PING frame");
-    if (!(conn->fc_flags & FC_SERVER))
-        log_conn_flow_control(conn);
-
-    lsquic_packet_out_set_pns(packet_out, PNS_APP);
     lsquic_packet_out_zero_pad(packet_out);
 
     return packet_out;
@@ -3641,8 +3640,15 @@ full_conn_ci_tick (lsquic_conn_t *lconn, lsquic_time_t now)
     if (!TAILQ_EMPTY(&conn->fc_pub.write_streams))
         process_streams_write_events(conn, 0);
 
-    lsquic_send_ctl_maybe_app_limited(&conn->fc_send_ctl, &conn->fc_path,
-                                        full_conn_bw_probe_fill, conn);
+    // Do not fill in extra packets before the handshake is complete or when
+    // the connection is closing.
+    if ((conn->fc_conn.cn_flags & LSCONN_HANDSHAKE_DONE)
+        && !(conn->fc_flags & (FC_CLOSING|FC_IMMEDIATE_CLOSE_FLAGS)))
+        lsquic_send_ctl_maybe_app_limited(&conn->fc_send_ctl, &conn->fc_path,
+                        full_conn_bw_probe_fill, conn);
+    else
+        lsquic_send_ctl_maybe_app_limited(&conn->fc_send_ctl, &conn->fc_path,
+                        NULL, NULL);
 
   end_write:
 
