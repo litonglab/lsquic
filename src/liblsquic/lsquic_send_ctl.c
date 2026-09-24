@@ -214,6 +214,14 @@ static void
 send_ctl_expire (struct lsquic_send_ctl *, enum packnum_space,
                                                         enum expire_filter);
 
+
+static void
+send_ctl_drop_scheduled_probe_fill (struct lsquic_send_ctl *);
+
+
+static unsigned
+send_ctl_get_n_consec_rtos (struct lsquic_send_ctl *);
+
 static void
 set_retx_alarm (struct lsquic_send_ctl *, enum packnum_space, lsquic_time_t);
 
@@ -403,8 +411,6 @@ retx_alarm_rings (enum alarm_id al_id, void *ctx, lsquic_time_t expiry, lsquic_t
     packet_out = send_ctl_first_unacked_retx_packet(ctl, pns);
     if (!packet_out)
     {
-        if (ctl->sc_n_consec_rtos && 0 == ctl->sc_next_limit)
-            ctl->sc_next_limit = 2;
         lsquic_send_ctl_sanity_check(ctl);
         return;
     }
@@ -433,6 +439,7 @@ retx_alarm_rings (enum alarm_id al_id, void *ctx, lsquic_time_t expiry, lsquic_t
             ctl->sc_last_rto_time = now;
             ++ctl->sc_n_consec_rtos;
             ctl->sc_next_limit = 2;
+            send_ctl_drop_scheduled_probe_fill(ctl);
             ctl->sc_ci->cci_timeout(CGP(ctl));
             if (lconn->cn_if->ci_retx_timeout)
                 lconn->cn_if->ci_retx_timeout(lconn);
@@ -2108,7 +2115,13 @@ lsquic_send_ctl_maybe_app_limited (struct lsquic_send_ctl *ctl,
     struct lsquic_packet_out *probe_packet;
     unsigned num_probing = 0;
 
-    if (ctl->sc_ci->cci_bw_probe_fill_wanted(CGP(ctl)) && bw_probe_fill_cb)
+    /*
+     * After an RTO, only a couple of packets may be sent until the peer
+     * acknowledges something.  Probe-fill packets must not use up that
+     * allowance.
+     */
+    if (bw_probe_fill_cb && 0 == send_ctl_get_n_consec_rtos(ctl)
+                        && ctl->sc_ci->cci_bw_probe_fill_wanted(CGP(ctl)))
     {
         while (ctl->sc_ci->cci_bw_probe_fill_wanted(CGP(ctl))
                && lsquic_send_ctl_can_send(ctl))
@@ -3119,6 +3132,38 @@ lsquic_send_ctl_drop_scheduled (lsquic_send_ctl_t *ctl)
 
     LSQ_DEBUG("dropped %u scheduled packet%s (%u left)", n, n != 1 ? "s" : "",
         ctl->sc_n_scheduled);
+}
+
+
+/* Probe-fill packets waiting in the scheduled queue are useless after an
+ * RTO: they carry no data and would eat into the post-RTO send allowance.
+ */
+static void
+send_ctl_drop_scheduled_probe_fill (struct lsquic_send_ctl *ctl)
+{
+    struct lsquic_packet_out *packet_out, *next;
+    unsigned n;
+
+    n = 0;
+    for (packet_out = TAILQ_FIRST(&ctl->sc_scheduled_packets); packet_out;
+                                                            packet_out = next)
+    {
+        next = TAILQ_NEXT(packet_out, po_next);
+        if (packet_out->po_flags & PO_BW_PROBE_FILL)
+        {
+            send_ctl_sched_remove(ctl, packet_out);
+            send_ctl_destroy_chain(ctl, packet_out, NULL);
+            send_ctl_destroy_packet(ctl, packet_out);
+            ++n;
+        }
+    }
+
+    if (n)
+    {
+        lsquic_send_ctl_reset_packnos(ctl);
+        LSQ_DEBUG("dropped %u scheduled probe-fill packet%s (%u left)", n,
+                                        n != 1 ? "s" : "", ctl->sc_n_scheduled);
+    }
 }
 
 

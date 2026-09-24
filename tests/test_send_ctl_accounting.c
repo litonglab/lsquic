@@ -64,6 +64,9 @@ set_dcid_len (struct network_path *path, unsigned len)
 }
 
 
+static const struct conn_iface s_conn_if;
+
+
 static void
 init_test (struct accounting_test *t)
 {
@@ -73,6 +76,7 @@ init_test (struct accounting_test *t)
     t->lconn.cn_version = LSQVER_I001;
     t->lconn.cn_pf = select_pf_by_ver(LSQVER_I001);
     t->lconn.cn_esf_c = &lsquic_enc_session_common_ietf_v1;
+    t->lconn.cn_if = &s_conn_if;
 
     lsquic_engine_init_settings(&t->enpub.enp_settings, 0);
     t->enpub.enp_settings.es_cc_algo = LSQUIC_CC_CUBIC;
@@ -494,7 +498,46 @@ test_bw_probe_fill_alarm_does_not_trigger_recovery (void)
 
 
 static void
-test_bw_probe_fill_alarm_restores_rto_progress (void)
+test_bw_probe_fill_skipped_during_rto_recovery (void)
+{
+    struct accounting_test t;
+    struct lsquic_bbr *bbr;
+
+    init_test(&t);
+    assert(0 == lsquic_send_ctl_set_cc_algo(&t.send_ctl,
+                                            LSQUIC_CC_BBR_COPILOT));
+    t.send_ctl.sc_flags &= ~SC_PACE;
+    bbr = &t.send_ctl.sc_adaptive_cc.acc_bbr;
+    bbr->bbr_pacing_gain = 1.25;
+    bbr->bbr_last_app_data_sent = lsquic_time_now();
+
+    /* Pretend an RTO just fired: the two-packet allowance is in effect */
+    t.send_ctl.sc_n_consec_rtos = 1;
+    t.send_ctl.sc_last_rto_time = 1000;
+    t.send_ctl.sc_last_sent_time = 1000;
+    t.send_ctl.sc_next_limit = 2;
+
+    lsquic_send_ctl_tick_in(&t.send_ctl, 2000);
+    lsquic_send_ctl_maybe_app_limited(&t.send_ctl, &t.path,
+                                            generate_bw_probe_fill, &t);
+    assert(0 == t.send_ctl.sc_n_scheduled);
+    assert(2 == t.send_ctl.sc_next_limit);
+
+    /* Once the RTO state is stale (no RTT samples: RTO is 500 ms, doubled
+     * once for the consecutive RTO), fill resumes as usual.
+     */
+    t.send_ctl.sc_last_sent_time = 1000 + 2 * 500000 + 1;
+    lsquic_send_ctl_maybe_app_limited(&t.send_ctl, &t.path,
+                                            generate_bw_probe_fill, &t);
+    assert(0 == t.send_ctl.sc_n_consec_rtos);
+    assert(t.send_ctl.sc_n_scheduled > 0);
+    assert_scheduled_accounting(&t);
+    cleanup_test(&t);
+}
+
+
+static void
+test_rto_drops_scheduled_bw_probe_fill (void)
 {
     struct accounting_test t;
     struct lsquic_packet_out *packet_out, *data_out;
@@ -505,38 +548,50 @@ test_bw_probe_fill_alarm_restores_rto_progress (void)
     assert(0 == lsquic_send_ctl_set_cc_algo(&t.send_ctl,
                                             LSQUIC_CC_BBR_COPILOT));
     t.send_ctl.sc_flags &= ~SC_PACE;
-    t.send_ctl.sc_n_consec_rtos = 1;
-    t.send_ctl.sc_next_limit = 2;
+    /* Skip TLP so that the first alarm is an RTO */
+    t.send_ctl.sc_n_tlp = 2;
 
+    /* One retransmittable packet in flight, two fill packets still queued
+     * behind it.  MAX_DATA is used so that resubmission does not need
+     * stream frame records.
+     */
+    data_out = lsquic_send_ctl_new_packet_out(&t.send_ctl, 1, PNS_APP,
+                                                                    &t.path);
+    assert(data_out);
+    data_out->po_frame_types = QUIC_FTBIT_MAX_DATA;
+    data_out->po_data_sz = 1;
+    lsquic_send_ctl_scheduled_one(&t.send_ctl, data_out);
+    packet_out = lsquic_send_ctl_next_packet_to_send(&t.send_ctl, NULL);
+    assert(packet_out == data_out);
+    packet_out->po_sent = 1000;
+    assert(0 == lsquic_send_ctl_sent_packet(&t.send_ctl, packet_out));
     for (n = 0; n < 2; ++n)
     {
         packet_out = generate_bw_probe_fill(&t, &t.path);
         packet_out->po_flags |= PO_BW_PROBE_FILL;
         lsquic_send_ctl_scheduled_one(&t.send_ctl, packet_out);
-        packet_out = lsquic_send_ctl_next_packet_to_send(&t.send_ctl, NULL);
-        assert(packet_out);
-        packet_out->po_sent = 1000 + n;
-        assert(0 == lsquic_send_ctl_sent_packet(&t.send_ctl, packet_out));
     }
-
-    data_out = lsquic_send_ctl_new_packet_out(&t.send_ctl, 1, PNS_APP,
-                                                                    &t.path);
-    assert(data_out);
-    data_out->po_frame_types = QUIC_FTBIT_STREAM;
-    data_out->po_data_sz = 1;
-    lsquic_send_ctl_scheduled_one(&t.send_ctl, data_out);
-    assert(0 == t.send_ctl.sc_next_limit);
-    assert(NULL == lsquic_send_ctl_next_packet_to_send(&t.send_ctl, NULL));
+    assert(2 == t.send_ctl.sc_n_scheduled);
 
     assert(lsquic_alarmset_is_set(&t.alset, AL_RETX_APP));
     expiry = t.alset.as_expiry[AL_RETX_APP];
     lsquic_alarmset_ring_expired(&t.alset, expiry + 1);
-    assert(0 == t.send_ctl.sc_n_in_flight_all);
     assert(1 == t.send_ctl.sc_n_consec_rtos);
-    assert(!lsquic_alarmset_is_set(&t.alset, AL_RETX_APP));
+    assert(2 == t.send_ctl.sc_next_limit);
+    assert(0 == t.send_ctl.sc_n_in_flight_all);
 
+    /* The queued fill packets are gone.  The lost data packet, once
+     * rescheduled, is the only thing left and it is allowed to go out.
+     */
+    assert(0 == t.send_ctl.sc_n_scheduled);
+    assert(1 == lsquic_send_ctl_reschedule_packets(&t.send_ctl));
+    assert(1 == t.send_ctl.sc_n_scheduled);
+    assert_scheduled_accounting(&t);
+    TAILQ_FOREACH(packet_out, &t.send_ctl.sc_scheduled_packets, po_next)
+        assert(0 == (packet_out->po_flags & PO_BW_PROBE_FILL));
     packet_out = lsquic_send_ctl_next_packet_to_send(&t.send_ctl, NULL);
     assert(packet_out == data_out);
+    assert(1 == t.send_ctl.sc_next_limit);
     packet_out->po_sent = expiry + 2;
     assert(0 == lsquic_send_ctl_sent_packet(&t.send_ctl, packet_out));
     assert(1 == t.send_ctl.sc_n_in_flight_retx);
@@ -558,6 +613,7 @@ main (void)
     test_bw_probe_fill_scheduling();
     test_lost_bw_probe_fill_is_not_rescheduled();
     test_bw_probe_fill_alarm_does_not_trigger_recovery();
-    test_bw_probe_fill_alarm_restores_rto_progress();
+    test_bw_probe_fill_skipped_during_rto_recovery();
+    test_rto_drops_scheduled_bw_probe_fill();
     return 0;
 }
