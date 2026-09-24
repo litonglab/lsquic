@@ -403,6 +403,8 @@ retx_alarm_rings (enum alarm_id al_id, void *ctx, lsquic_time_t expiry, lsquic_t
     packet_out = send_ctl_first_unacked_retx_packet(ctl, pns);
     if (!packet_out)
     {
+        if (ctl->sc_n_consec_rtos && 0 == ctl->sc_next_limit)
+            ctl->sc_next_limit = 2;
         lsquic_send_ctl_sanity_check(ctl);
         return;
     }
