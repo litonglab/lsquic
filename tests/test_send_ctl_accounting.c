@@ -493,6 +493,58 @@ test_bw_probe_fill_alarm_does_not_trigger_recovery (void)
 }
 
 
+static void
+test_bw_probe_fill_alarm_restores_rto_progress (void)
+{
+    struct accounting_test t;
+    struct lsquic_packet_out *packet_out, *data_out;
+    lsquic_time_t expiry;
+    unsigned n;
+
+    init_test(&t);
+    assert(0 == lsquic_send_ctl_set_cc_algo(&t.send_ctl,
+                                            LSQUIC_CC_BBR_COPILOT));
+    t.send_ctl.sc_flags &= ~SC_PACE;
+    t.send_ctl.sc_n_consec_rtos = 1;
+    t.send_ctl.sc_next_limit = 2;
+
+    for (n = 0; n < 2; ++n)
+    {
+        packet_out = generate_bw_probe_fill(&t, &t.path);
+        packet_out->po_flags |= PO_BW_PROBE_FILL;
+        lsquic_send_ctl_scheduled_one(&t.send_ctl, packet_out);
+        packet_out = lsquic_send_ctl_next_packet_to_send(&t.send_ctl, NULL);
+        assert(packet_out);
+        packet_out->po_sent = 1000 + n;
+        assert(0 == lsquic_send_ctl_sent_packet(&t.send_ctl, packet_out));
+    }
+
+    data_out = lsquic_send_ctl_new_packet_out(&t.send_ctl, 1, PNS_APP,
+                                                                    &t.path);
+    assert(data_out);
+    data_out->po_frame_types = QUIC_FTBIT_STREAM;
+    data_out->po_data_sz = 1;
+    lsquic_send_ctl_scheduled_one(&t.send_ctl, data_out);
+    assert(0 == t.send_ctl.sc_next_limit);
+    assert(NULL == lsquic_send_ctl_next_packet_to_send(&t.send_ctl, NULL));
+
+    assert(lsquic_alarmset_is_set(&t.alset, AL_RETX_APP));
+    expiry = t.alset.as_expiry[AL_RETX_APP];
+    lsquic_alarmset_ring_expired(&t.alset, expiry + 1);
+    assert(0 == t.send_ctl.sc_n_in_flight_all);
+    assert(1 == t.send_ctl.sc_n_consec_rtos);
+    assert(!lsquic_alarmset_is_set(&t.alset, AL_RETX_APP));
+
+    packet_out = lsquic_send_ctl_next_packet_to_send(&t.send_ctl, NULL);
+    assert(packet_out == data_out);
+    packet_out->po_sent = expiry + 2;
+    assert(0 == lsquic_send_ctl_sent_packet(&t.send_ctl, packet_out));
+    assert(1 == t.send_ctl.sc_n_in_flight_retx);
+    assert(lsquic_alarmset_is_set(&t.alset, AL_RETX_APP));
+    cleanup_test(&t);
+}
+
+
 int
 main (void)
 {
@@ -506,5 +558,6 @@ main (void)
     test_bw_probe_fill_scheduling();
     test_lost_bw_probe_fill_is_not_rescheduled();
     test_bw_probe_fill_alarm_does_not_trigger_recovery();
+    test_bw_probe_fill_alarm_restores_rto_progress();
     return 0;
 }
