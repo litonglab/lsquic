@@ -446,6 +446,14 @@ settings structure:
        compatibility.  :func:`lsquic_conn_is_push_enabled()` returns false and
        :func:`lsquic_conn_push_stream()` returns 1.
 
+    .. member:: unsigned char   es_max_crypto_stash
+
+       Maximum number of out-of-order CRYPTO frames that a mini connection
+       stashes while waiting for missing predecessor frames.  The connection
+       is aborted when the limit is reached.
+
+       The default value is :macro:`LSQUIC_DF_MAX_CRYPTO_STASH`.
+
     .. member:: int             es_support_tcid0
 
        If set to true value, the server will not include connection ID in
@@ -1390,7 +1398,9 @@ the engine to communicate with the user code:
 
     .. member:: void (*on_hsk_done)(lsquic_conn_t *c, enum lsquic_hsk_status s)
 
-        When handshake is completed, this callback is called.
+        Called only in client mode when the handshake completes, successfully
+        or unsuccessfully.  In server mode,
+        :member:`lsquic_stream_if.on_new_conn` indicates a successful handshake.
 
         This callback is optional.
 
@@ -1532,7 +1542,9 @@ Closing Connections
 .. function:: void lsquic_conn_close (lsquic_conn_t *conn)
 
     This closes the connection.  :member:`lsquic_stream_if.on_conn_closed`
-    and :member:`lsquic_stream_if.on_close` callbacks will be called.
+    and :member:`lsquic_stream_if.on_close` callbacks will be called.  Closing
+    an established IETF QUIC connection sends a transport-level
+    ``CONNECTION_CLOSE`` frame with the ``NO_ERROR`` code.
 
 .. function:: void lsquic_conn_abort (lsquic_conn_t *conn)
 
@@ -2070,7 +2082,24 @@ Miscellaneous Connection Functions
     Get certificate chain returned by the server.  This can be used for
     server certificate verification.
 
-    The caller releases the stack using sk_X509_free().
+    The caller owns the returned stack and certificate references and releases
+    them using ``sk_X509_pop_free(chain, X509_free)``.
+
+.. function:: struct stack_st_X509 * lsquic_conn_get_full_peer_cert_chain (lsquic_conn_t *conn)
+
+    Get the peer's certificate chain, including the leaf certificate: the
+    client's chain in server mode, or the server's chain in client mode.
+    The chain does not necessarily include the root certificate.
+
+    Call this from :member:`lsquic_stream_if.on_new_conn` in server mode, or
+    from a successful :member:`lsquic_stream_if.on_hsk_done` callback in client
+    mode.  The TLS state may be released later.
+
+    Returns NULL if the chain is unavailable.  gQUIC does not support client
+    certificates and always returns NULL in server mode.
+
+    The caller owns the returned stack and certificate references and releases
+    them using ``sk_X509_pop_free(chain, X509_free)``.
 
 .. function:: lsquic_conn_ctx_t * lsquic_conn_get_ctx (const lsquic_conn_t *conn)
 
